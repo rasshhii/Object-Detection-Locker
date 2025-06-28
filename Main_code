@@ -1,0 +1,199 @@
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+#include <Aditya524ks_project_1_inferencing.h>
+#include "edge-impulse-sdk/dsp/image/image.hpp"
+#include "esp_camera.h"
+
+// WiFi credentials
+const char* ssid = "abcd1234";
+const char* password = "1234567890";
+
+// Twilio credentials
+const char* account_sid = "ACe7dccaa8edb33f1f1262559f043cc2bf";
+const char* auth_token = "8460203e6aaf88b69bd8954441d22b50";
+const char* from_number = "+19782459681";
+const char* to_number = "+917020984482";
+const char* message_url = "https://api.twilio.com/2010-04-01/Accounts/ACe7dccaa8edb33f1f1262559f043cc2bf/Messages.json";
+
+// Camera pin config for AI Thinker ESP32-CAM
+#define PWDN_GPIO_NUM     32
+#define RESET_GPIO_NUM    -1
+#define XCLK_GPIO_NUM      0
+#define SIOD_GPIO_NUM     26
+#define SIOC_GPIO_NUM     27
+#define Y9_GPIO_NUM       35
+#define Y8_GPIO_NUM       34
+#define Y7_GPIO_NUM       39
+#define Y6_GPIO_NUM       36
+#define Y5_GPIO_NUM       21
+#define Y4_GPIO_NUM       19
+#define Y3_GPIO_NUM       18
+#define Y2_GPIO_NUM        5
+#define VSYNC_GPIO_NUM    25
+#define HREF_GPIO_NUM     23
+#define PCLK_GPIO_NUM     22
+
+#define EI_CAMERA_RAW_FRAME_BUFFER_COLS 320
+#define EI_CAMERA_RAW_FRAME_BUFFER_ROWS 240
+#define EI_CAMERA_FRAME_BYTE_SIZE 3
+
+static camera_config_t camera_config = {
+    .pin_pwdn = PWDN_GPIO_NUM,
+    .pin_reset = RESET_GPIO_NUM,
+    .pin_xclk = XCLK_GPIO_NUM,
+    .pin_sscb_sda = SIOD_GPIO_NUM,
+    .pin_sscb_scl = SIOC_GPIO_NUM,
+    .pin_d7 = Y9_GPIO_NUM,
+    .pin_d6 = Y8_GPIO_NUM,
+    .pin_d5 = Y7_GPIO_NUM,
+    .pin_d4 = Y6_GPIO_NUM,
+    .pin_d3 = Y5_GPIO_NUM,
+    .pin_d2 = Y4_GPIO_NUM,
+    .pin_d1 = Y3_GPIO_NUM,
+    .pin_d0 = Y2_GPIO_NUM,
+    .pin_vsync = VSYNC_GPIO_NUM,
+    .pin_href = HREF_GPIO_NUM,
+    .pin_pclk = PCLK_GPIO_NUM,
+    .xclk_freq_hz = 20000000,
+    .ledc_timer = LEDC_TIMER_0,
+    .ledc_channel = LEDC_CHANNEL_0,
+    .pixel_format = PIXFORMAT_JPEG,
+    .frame_size = FRAMESIZE_QVGA,
+    .jpeg_quality = 12,
+    .fb_count = 1,
+    .fb_location = CAMERA_FB_IN_PSRAM,
+    .grab_mode = CAMERA_GRAB_WHEN_EMPTY,
+};
+
+uint8_t *snapshot_buf = nullptr;
+
+void setup() {
+    Serial.begin(115200);
+    delay(1000);
+
+    WiFi.begin(ssid, password);
+    Serial.print("Connecting to WiFi");
+    while (WiFi.status() != WL_CONNECTED) {
+        delay(500);
+        Serial.print(".");
+    }
+    Serial.println("\nWiFi connected!");
+
+    if (!ei_camera_init()) {
+        Serial.println("Camera init failed");
+    } else {
+        Serial.println("Camera ready!");
+    }
+
+    ei_sleep(2000);
+}
+
+void loop() {
+    snapshot_buf = (uint8_t*)malloc(EI_CAMERA_RAW_FRAME_BUFFER_COLS * EI_CAMERA_RAW_FRAME_BUFFER_ROWS * EI_CAMERA_FRAME_BYTE_SIZE);
+    if (!snapshot_buf) {
+        Serial.println("Failed to allocate snapshot buffer!");
+        return;
+    }
+
+    ei::signal_t signal;
+    signal.total_length = EI_CLASSIFIER_INPUT_WIDTH * EI_CLASSIFIER_INPUT_HEIGHT;
+    signal.get_data = &ei_camera_get_data;
+
+    if (!ei_camera_capture(EI_CLASSIFIER_INPUT_WIDTH, EI_CLASSIFIER_INPUT_HEIGHT, snapshot_buf)) {
+        Serial.println("Capture failed");
+        free(snapshot_buf);
+        return;
+    }
+
+    ei_impulse_result_t result = { 0 };
+    EI_IMPULSE_ERROR err = run_classifier(&signal, &result, false);
+    if (err != EI_IMPULSE_OK) {
+        Serial.printf("Classifier failed (%d)\n", err);
+        free(snapshot_buf);
+        return;
+    }
+
+    Serial.println("Predictions:");
+    String topLabel = "";
+    float topValue = 0;
+120
+3.2
+        const char* label = ei_classifier_inferencing_categories[i];
+        Serial.printf("  %s: %.5f\n", label, value);
+
+        if (value > topValue) {
+            topValue = value;
+            topLabel = label;
+        }
+    }
+
+    if (topValue > 0.7) {
+        sendSMS("Detected: " + topLabel + " (" + String(topValue * 100, 1) + "%)");
+    }
+
+    free(snapshot_buf);
+    delay(10000); // Wait 10 seconds
+}
+
+bool ei_camera_init(void) {
+    esp_err_t err = esp_camera_init(&camera_config);
+    return err == ESP_OK;
+}
+
+bool ei_camera_capture(uint32_t img_width, uint32_t img_height, uint8_t *out_buf) {
+    camera_fb_t *fb = esp_camera_fb_get();
+    if (!fb) return false;
+
+    bool converted = fmt2rgb888(fb->buf, fb->len, PIXFORMAT_JPEG, snapshot_buf);
+    esp_camera_fb_return(fb);
+    if (!converted) return false;
+
+    if (img_width != EI_CAMERA_RAW_FRAME_BUFFER_COLS || img_height != EI_CAMERA_RAW_FRAME_BUFFER_ROWS) {
+        ei::image::processing::crop_and_interpolate_rgb888(
+            out_buf,
+            EI_CAMERA_RAW_FRAME_BUFFER_COLS,
+            EI_CAMERA_RAW_FRAME_BUFFER_ROWS,
+            out_buf,
+            img_width,
+            img_height
+        );
+    }
+
+    return true;
+}
+
+static int ei_camera_get_data(size_t offset, size_t length, float *out_ptr) {
+    size_t pixel_ix = offset * 3;
+    size_t out_ptr_ix = 0;
+
+    while (length--) {
+        out_ptr[out_ptr_ix++] = (snapshot_buf[pixel_ix + 2] << 16) +
+                                (snapshot_buf[pixel_ix + 1] << 8) +
+                                snapshot_buf[pixel_ix];
+        pixel_ix += 3;
+    }
+
+    return 0;
+}
+
+void sendSMS(String messageBody) {
+    HTTPClient http;
+    http.begin(message_url);
+    http.setAuthorization(account_sid, auth_token);
+    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+
+    String payload = "To=" + String(to_number) +
+                     "&From=" + String(from_number) +
+                     "&Body=" + messageBody;
+
+    int httpResponseCode = http.POST(payload);
+    if (httpResponseCode > 0) {
+        Serial.printf("Twilio response: %d\n", httpResponseCode);
+        String response = http.getString();
+        Serial.println(response);
+    } else {
+        Serial.printf("Failed to send SMS: %s\n", http.errorToString(httpResponseCode).c_str());
+    }
+    http.end();
+}
