@@ -1,2 +1,2 @@
 # Object-Detection-Locker
-Main code
+first hackathon project
